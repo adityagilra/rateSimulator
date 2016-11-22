@@ -1,0 +1,9 @@
+
+This code is licensed under GNU GPL v3.0 (c) Aditya Gilra 2015.
+
+A simple python simulator for 'rate neurons' with continuous-valued, rectified output.
+It also has BCM synaptic plasticity, allowing a purely post-synaptic term a la Zenke et al 2015.
+
+USAGE:
+1) Ensure that this module can be found in your PYTHONPATH
+2) Run the usage.py script from usage/ directory
