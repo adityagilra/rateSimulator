@@ -27,6 +27,7 @@ class Model():
         self.groups = {}
         self.synapses = {}
         self.probes = {}
+        self.objects = {}
     
     def addGroup(self,group):
         self.groups[group.name] = group
@@ -36,6 +37,9 @@ class Model():
         
     def addProbe(self,probe):
         self.probes[probe.name] = probe
+        
+    def addObject(self,obj):
+        self.objects[obj.name] = obj
     
     def step(self,dt):
         for synapse in self.synapses.values():
@@ -44,9 +48,11 @@ class Model():
             group.step(dt)
         for probe in self.probes.values():
             probe.step(self.stepi)
+        for obj in self.objects.values():
+            obj.step(dt)
             
     def simulate(self,tsim):
-        tnows = np.arange(self.t+self.dt,self.t+tsim,self.dt)
+        tnows = np.arange(self.t,self.t+tsim,self.dt)
         for probe in self.probes.values():
             probe.addBlanks(len(tnows))
         for self.t in tnows:
@@ -61,12 +67,14 @@ class Model():
 # Neuron Groups
 # ###########################################
 
-# decaying rate neuron
-# equation: dinp/dt = 1/tau*(-inp + W.r_pre)
-#           r = maxR*(tanh(inp/linRange + bias)+1.)/2.
-
 class RateNeuronGroup():
-    def __init__(self,N,taum,maxR,bias,linRange,model,name):
+    def __init__(self,N,taum,maxR,bias,linRange,model,name,clip=True):
+        '''
+        Rate neuron with low-pass filtered input.
+         Equation:  dinp/dt = 1/tau*(-inp + W.r_pre)
+                    r = maxR * tanh(inp/linRange + bias)
+         Can set clipping of negative rates True or False.
+        '''
         self.N = N
         self.r = np.zeros(N)
         self.inp = np.zeros(N)
@@ -77,8 +85,14 @@ class RateNeuronGroup():
         self.model = model
         self.name = name
         model.addGroup(self)
+        if clip:
+            self.clip = lambda x,minx,maxx: np.clip(x,minx,maxx)
+        else:
+            self.clip = lambda x,minx,maxx: x
         
     def incrInp(self,deltaInp):
+        '''CAUTION: Be sure to include dt* in the deltaInp when passing it in,
+         else normalization of the low-pass becomes off!'''
         self.inp += deltaInp/self.taum  # deltaInp should have dt* already
     
     def step(self,dt):
@@ -89,7 +103,7 @@ class RateNeuronGroup():
         #   so that we have a negative 'buffer' zone for inp<0
         #   i.e. inp<0 (purely inhibitory input) doesn't affect the rates
         self.r = self.maxR*(np.tanh(\
-                    np.clip(self.inp/self.linRange+self.bias,0.,None) ))
+                    self.clip(self.inp/self.linRange+self.bias,0.,None) ))
 
 class ConstantRateNeuronGroup():
     def __init__(self,N,rates=0.):
@@ -114,12 +128,22 @@ class Synapses():
         model.addSynapses(self)
     
     def connect(self,numPerNrn,w):
+        '''Conect each post-neuron with numPerNrn pre-neurons chosen randomly, with weight w'''
         # for each post neuron
         for nrni in range(self.groupPost.N):
             # permute the indices of pre neurons and choose numPerNrn
             #  i.e. just sample (without replacement) numPerNrn from pre neurons
             self.Wconnected[ nrni, np.random.permutation(self.groupPre.N)[:numPerNrn] ] = 1
         self.W = self.Wconnected*w
+        
+    def connect(self,W,Wconnected=None):
+        '''Connect as per given weight matrix W,
+         masked by connection matrix Wconnected (default all-to-all)'''
+        if Wconnected is None:
+            self.Wconnected = np.ones(shape=(self.groupPost.N,self.groupPre.N))
+        else:
+            self.Wconnected = Wconnected
+        self.W = self.Wconnected*W
     
     def step(self,dt):
         self.groupPost.incrInp(dt*np.dot(self.W,self.groupPre.r))
@@ -199,6 +223,47 @@ class SynapsesPlasticBCM(Synapses):
         self.W += deltaW + deltaWTriplet + deltaW2
         self.W = np.clip(self.W,0.,self.wmax)
                                             # don't allow negative or too high weights
+        Synapses.step(self,dt)
+
+class SynapsesNodePerturb(Synapses):
+    def __init__(self,groupPre,groupPost,model,name, \
+                    learningRate = 0.1,rewardDecayTau=0.1,voltageDecayTau=0.1):
+        ''' eligibilityTrace += supra-lin-func( pre_rate * (post_memb_pot - running_mean(post_memb_pot)) )
+        deltaW = dt * learningRate * eligibilityTrace * (reward - running_mean(reward))
+        SI units: learningRate in Hz, rewardDecayTau and voltageDecayTau in s.
+        voltageDecayTau must filter out the fast perturbations in RateNeuronGroup.inp,
+            so it must be larger than the latter's filtering tau.
+        IMPORTANT: self.reward should be updated before self.step() is called,
+        pre and post neuron groups should be updated after self.step() is called,
+         both since neural input depends on synaptic input
+          and weights / eligibility traces should be updated using previous neural rates/voltages.
+        '''
+        Synapses.__init__(self,groupPre,groupPost,model,name)
+        self.learningRate = learningRate
+        self.eligibilityTraces = np.zeros(shape=(groupPost.N,groupPre.N))
+        self.reward = 0.0
+        self.rewardMean = 0.0
+        self.rewardDecayTau = rewardDecayTau# in Miconi 2017 (1-dt/tau)=0.33
+        self.postVoltageMean = np.zeros(groupPost.N)
+        self.voltageDecayTau = voltageDecayTau
+
+    def step(self,dt):
+        # eligibilityTraces updated with previous time steps Post and Pre quantities,
+        # since RateNeuronGroup.step() is called after this
+        self.eligibilityTraces += np.power( np.outer( 
+                                                self.groupPost.inp - self.postVoltageMean,
+                                                self.groupPre.r ), 3 )
+        # only the Wconnected == 1 (connected) synapses are modified
+        deltaW = self.Wconnected * dt * self.learningRate \
+                    * self.eligibilityTraces * (self.reward - self.rewardMean)
+        # update the mean reward and mean voltages only after the weights changes
+        self.rewardMean = (1-dt/self.rewardDecayTau)*self.rewardMean \
+                                + dt/self.rewardDecayTau*self.reward
+        self.postVoltageMean *= (1-dt/self.voltageDecayTau) + self.groupPost.inp
+        
+        self.W += deltaW
+        #self.W = np.clip(self.W,0.,self.wmax)
+        #                                    # don't allow negative or too high weights
         Synapses.step(self,dt)
 
 # ###########################################
