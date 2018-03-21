@@ -78,8 +78,9 @@ class Model():
         tnows = np.arange(self.t,self.t+tsim,self.dt)
         for probe in self.probes.values():
             probe.addBlanks(len(tnows))
-        for self.t in tnows:
+        for t in tnows:
             self.step(self.dt)
+            self.t += self.dt
             self.stepi += 1
             if self.t >= self.treport+1e4*self.dt:
                 print 'Simulated for ',self.t,'s'
@@ -261,8 +262,8 @@ class SynapsesPlasticBCM(Synapses):
 
 class SynapsesNodePerturb(Synapses):
     def __init__(self,groupPre,groupPost,model,name, \
-                    learningRate = 1e-4,rewardDecayTau=0.1,voltageDecayTau=0.1,\
-                    minDeltaW=-1e-5,maxDeltaW=+1e-5):
+                    learningRate = 1e-5,rewardDecayTau=0.1,voltageDecayTau=0.1,\
+                    minDeltaW=-1e-4,maxDeltaW=+1e-4,clipW=False,minW=-1.,maxW=1.):
         ''' eligibilityTrace += supra-lin-func( pre_rate * (post_memb_pot - running_mean(post_memb_pot)) )
         deltaW = dt * learningRate * eligibilityTrace * (reward - running_mean(reward))
         SI units: learningRate in Hz, rewardDecayTau and voltageDecayTau in s.
@@ -280,6 +281,9 @@ class SynapsesNodePerturb(Synapses):
         self.voltageDecayTau = voltageDecayTau
         self.minDeltaW = minDeltaW
         self.maxDeltaW = maxDeltaW
+        self.clipW=clipW
+        self.minW = minW
+        self.maxW = maxW
         self.reset()
 
     def step(self,dt):
@@ -305,7 +309,8 @@ class SynapsesNodePerturb(Synapses):
         self.deltaW = np.clip(self.deltaW,self.minDeltaW,self.maxDeltaW)
         self.W += self.deltaW
         # clip to not allow too high weights
-        #self.W = np.clip(self.W,self.minW,self.maxW)
+        if self.clipW:
+            self.W = np.clip(self.W,self.minW,self.maxW)
 
         # update the mean reward and mean voltages only after the weights changes
         self.rewardMean = (1-dt/self.rewardDecayTau)*self.rewardMean \
@@ -374,14 +379,21 @@ class PopRateProbe(RateProbe):
         self.data[stepi] = np.mean(self.rateGroup.r)
 
 class SynapsesProbe():
-    def __init__(self,synObj,model,name):
+    """NOTE: len of data for these probes will be slightly larger than actual number of time steps.
+    This is because 1 is added to the number of steps needed,
+     in case the array falls short due to truncation and accumulation when multiple model.simulate() calls are made.
+    Slice and discard the last values, by calculating using the length of the data of any other 1 dt probe.
+    """
+    def __init__(self,synObj,model,name,probeSteps=1):
         self.synObj = synObj
         self.data = None
         self.model = model
         self.name = name
+        self.probeSteps = probeSteps    # record / probe every probeSteps # of time steps
         model.addProbe(self)
         
     def addBlanks(self,numsteps):
+        numsteps = numsteps // self.probeSteps + 1      # one extra in case it falls short
         if self.data is None:
             self.data = np.zeros(shape=(numsteps,
                             self.synObj.groupPost.N,
@@ -394,18 +406,25 @@ class SynapsesProbe():
                     axis=0 )
         
     def step(self,stepi):
-        self.data[stepi,:,:] = self.synObj.W
+        if stepi % self.probeSteps == 0:
+            self.data[stepi//self.probeSteps,:,:] = self.synObj.W
 
     def reset(self): pass
 
 class SynapsesArbProbe(SynapsesProbe):
-    '''Probe an arbitrary attribute of a Synapses object'''        
-    def __init__(self,synObj,model,name,attrib='W'):
-        SynapsesProbe.__init__(self,synObj,model,name)
+    """Probe an arbitrary attribute of a Synapses object.
+    NOTE: len of data for these probes will be slightly larger than actual number of time steps.
+    This is because 1 is added to the number of steps needed,
+     in case the array falls short due to truncation and accumulation when multiple model.simulate() calls are made.
+    Slice and discard the last values, by calculating using the length of the data of any other 1 dt probe.
+    """
+    def __init__(self,synObj,model,name,attrib='W',probeSteps=1):
+        SynapsesProbe.__init__(self,synObj,model,name,probeSteps)
         self.attrib = attrib
         self.dataShape = getattr(self.synObj,self.attrib).shape
 
     def addBlanks(self,numsteps):
+        numsteps = numsteps // self.probeSteps + 1      # one extra in case it falls short
         if self.data is None:
             self.data = np.zeros(shape=
                             np.concatenate(([numsteps],self.dataShape)))
@@ -416,7 +435,8 @@ class SynapsesArbProbe(SynapsesProbe):
                         axis=0 )
 
     def step(self,stepi):
-        self.data[stepi,...] = getattr(self.synObj,self.attrib) 
+        if stepi % self.probeSteps == 0:
+            self.data[stepi//self.probeSteps,...] = getattr(self.synObj,self.attrib) 
 
 class SynapsesMeanProbe():
     def __init__(self,synObj,model,name):
