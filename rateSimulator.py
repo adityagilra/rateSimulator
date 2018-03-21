@@ -6,6 +6,7 @@ A simulator for a network of rate-neurons written in Python
 
 # import modules and functions to be used
 import numpy as np
+import sys
 
 # The numpy seed should be set by the script calling this simulator
 # Currently, there is no provision to set an independent seed just for this simulator.
@@ -30,16 +31,28 @@ class Model():
         self.objects = {}
     
     def addGroup(self,group):
-        self.groups[group.name] = group
+        if group.name not in self.groups.keys():
+            self.groups[group.name] = group
+        else:
+            raise ValueError('group name '+group.name+' is duplicate')
     
     def addSynapses(self,synapses):
-        self.synapses[synapses.name] = synapses
+        if synapses.name not in self.synapses.keys():
+            self.synapses[synapses.name] = synapses
+        else:
+            raise ValueError('synapses name '+synapses.name+' is duplicate')
         
     def addProbe(self,probe):
-        self.probes[probe.name] = probe
+        if probe.name not in self.probes.keys():
+            self.probes[probe.name] = probe
+        else:
+            raise ValueError('probe name '+probe.name+' is duplicate')
         
     def addObject(self,obj):
-        self.objects[obj.name] = obj
+        if obj.name not in self.objects.keys():
+            self.objects[obj.name] = obj
+        else:
+            raise ValueError('object name '+obj.name+' is duplicate')
     
     def step(self,dt):
         for synapse in self.synapses.values():
@@ -50,6 +63,16 @@ class Model():
             probe.step(self.stepi)
         for obj in self.objects.values():
             obj.step(dt)
+
+    def reset(self):
+        for synapse in self.synapses.values():
+            synapse.reset()
+        for group in self.groups.values():
+            group.reset()
+        for probe in self.probes.values():
+            probe.reset()
+        for obj in self.objects.values():
+            obj.reset()
             
     def simulate(self,tsim):
         tnows = np.arange(self.t,self.t+tsim,self.dt)
@@ -76,8 +99,6 @@ class RateNeuronGroup():
          Can set clipping of negative rates True or False.
         '''
         self.N = N
-        self.r = np.zeros(N)
-        self.inp = np.zeros(N)
         self.taum = taum                # s # Membrane time constant
         self.bias = bias                # constant bias input to all neurons
         self.maxR = maxR                # Hz # max firing rate
@@ -89,6 +110,7 @@ class RateNeuronGroup():
             self.clip = lambda x,minx,maxx: np.clip(x,minx,maxx)
         else:
             self.clip = lambda x,minx,maxx: x
+        self.reset()
         
     def incrInp(self,deltaInp):
         '''CAUTION: Be sure to include dt* in the deltaInp when passing it in,
@@ -104,6 +126,10 @@ class RateNeuronGroup():
         #   i.e. inp<0 (purely inhibitory input) doesn't affect the rates
         self.r = self.maxR*(np.tanh(\
                     self.clip(self.inp/self.linRange+self.bias,0.,None) ))
+    
+    def reset(self):
+        self.inp = np.zeros(self.N)
+        self.r = np.zeros(self.N)
 
 class ConstantRateNeuronGroup():
     def __init__(self,N,rates=0.):
@@ -112,6 +138,10 @@ class ConstantRateNeuronGroup():
         '''
         self.N = N
         self.r = rates*np.ones(N)
+
+    def reset(self): pass
+
+    def step(dt): pass
 
 # ###########################################
 # Synaptic connections between Groups
@@ -147,6 +177,8 @@ class Synapses():
     
     def step(self,dt):
         self.groupPost.incrInp(dt*np.dot(self.W,self.groupPre.r))
+
+    def reset(self): pass
 
 class SynapsesPlasticBCM(Synapses):
     def __init__(self,groupPre,groupPost,model,name,\
@@ -225,9 +257,12 @@ class SynapsesPlasticBCM(Synapses):
                                             # don't allow negative or too high weights
         Synapses.step(self,dt)
 
+    def reset(self): pass
+
 class SynapsesNodePerturb(Synapses):
     def __init__(self,groupPre,groupPost,model,name, \
-                    learningRate = 0.1,rewardDecayTau=0.1,voltageDecayTau=0.1):
+                    learningRate = 1e-4,rewardDecayTau=0.1,voltageDecayTau=0.1,\
+                    minDeltaW=-1e-5,maxDeltaW=+1e-5):
         ''' eligibilityTrace += supra-lin-func( pre_rate * (post_memb_pot - running_mean(post_memb_pot)) )
         deltaW = dt * learningRate * eligibilityTrace * (reward - running_mean(reward))
         SI units: learningRate in Hz, rewardDecayTau and voltageDecayTau in s.
@@ -240,31 +275,53 @@ class SynapsesNodePerturb(Synapses):
         '''
         Synapses.__init__(self,groupPre,groupPost,model,name)
         self.learningRate = learningRate
-        self.eligibilityTraces = np.zeros(shape=(groupPost.N,groupPre.N))
-        self.reward = 0.0
-        self.rewardMean = 0.0
+        self.deltaW = np.zeros(shape=(groupPost.N,groupPre.N))
         self.rewardDecayTau = rewardDecayTau# in Miconi 2017 (1-dt/tau)=0.33
-        self.postVoltageMean = np.zeros(groupPost.N)
         self.voltageDecayTau = voltageDecayTau
+        self.minDeltaW = minDeltaW
+        self.maxDeltaW = maxDeltaW
+        self.reset()
 
     def step(self,dt):
         # eligibilityTraces updated with previous time steps Post and Pre quantities,
         # since RateNeuronGroup.step() is called after this
+        #print "self.deltaW=",self.deltaW
+        #if self.model.t>187.5:
+        #    print "self.groupPost.inp",self.groupPost.inp
+        #    print "self.postVoltageMean",self.postVoltageMean
+        #    print "self.deltaW=",self.deltaW
+        #    print "self.eligibilityTraces=",self.eligibilityTraces
+        #    print "self.groupPre.r",self.groupPre.r
+        #if self.model.t>188.:
+        #    sys.exit()
         self.eligibilityTraces += np.power( np.outer( 
                                                 self.groupPost.inp - self.postVoltageMean,
                                                 self.groupPre.r ), 3 )
+
         # only the Wconnected == 1 (connected) synapses are modified
-        deltaW = self.Wconnected * dt * self.learningRate \
+        self.deltaW = self.Wconnected * dt * self.learningRate \
                     * self.eligibilityTraces * (self.reward - self.rewardMean)
+        # clipping the deltaW instead of W yields better stability of learning
+        self.deltaW = np.clip(self.deltaW,self.minDeltaW,self.maxDeltaW)
+        self.W += self.deltaW
+        # clip to not allow too high weights
+        #self.W = np.clip(self.W,self.minW,self.maxW)
+
         # update the mean reward and mean voltages only after the weights changes
         self.rewardMean = (1-dt/self.rewardDecayTau)*self.rewardMean \
                                 + dt/self.rewardDecayTau*self.reward
-        self.postVoltageMean *= (1-dt/self.voltageDecayTau) + self.groupPost.inp
+        self.postVoltageMean = (1-dt/self.voltageDecayTau)*self.postVoltageMean \
+                                + dt/self.voltageDecayTau*self.groupPost.inp
         
-        self.W += deltaW
-        #self.W = np.clip(self.W,0.,self.wmax)
-        #                                    # don't allow negative or too high weights
+        # use the weights to update the post neuronal inp-s.
         Synapses.step(self,dt)
+
+    def reset(self):
+        self.eligibilityTraces = np.zeros(shape=(self.groupPost.N,self.groupPre.N))
+        self.reward = 0.0
+        ## Very important: do not reset the reward and voltage means across trials!
+        self.rewardMean = 0.0
+        self.postVoltageMean = np.zeros(self.groupPost.N)
 
 # ###########################################
 # Probes
@@ -289,9 +346,20 @@ class RateProbe():
     def step(self,stepi):
         self.data[stepi,:] = self.rateGroup.r
 
+    def reset(self): pass
+
 class InpProbe(RateProbe):        
     def step(self,stepi):
         self.data[stepi,:] = self.rateGroup.inp
+
+class ArbProbe(RateProbe):
+    '''Probe an arbitrary attribute of a rateGroup object'''        
+    def __init__(self,rateGroup,model,name,attrib='inp'):
+        RateProbe.__init__(self,rateGroup,model,name)
+        self.attrib = attrib
+        
+    def step(self,stepi):
+        self.data[stepi,:] = getattr(self.rateGroup,self.attrib) 
 
 class PopRateProbe(RateProbe):
     def addBlanks(self,numsteps):
@@ -304,6 +372,51 @@ class PopRateProbe(RateProbe):
         
     def step(self,stepi):
         self.data[stepi] = np.mean(self.rateGroup.r)
+
+class SynapsesProbe():
+    def __init__(self,synObj,model,name):
+        self.synObj = synObj
+        self.data = None
+        self.model = model
+        self.name = name
+        model.addProbe(self)
+        
+    def addBlanks(self,numsteps):
+        if self.data is None:
+            self.data = np.zeros(shape=(numsteps,
+                            self.synObj.groupPost.N,
+                            self.synObj.groupPre.N))
+        else:
+            self.data = np.append( self.data,
+                    np.zeros(shape=(numsteps,
+                            self.synObj.groupPost.N,
+                            self.synObj.groupPre.N)),
+                    axis=0 )
+        
+    def step(self,stepi):
+        self.data[stepi,:,:] = self.synObj.W
+
+    def reset(self): pass
+
+class SynapsesArbProbe(SynapsesProbe):
+    '''Probe an arbitrary attribute of a Synapses object'''        
+    def __init__(self,synObj,model,name,attrib='W'):
+        SynapsesProbe.__init__(self,synObj,model,name)
+        self.attrib = attrib
+        self.dataShape = getattr(self.synObj,self.attrib).shape
+
+    def addBlanks(self,numsteps):
+        if self.data is None:
+            self.data = np.zeros(shape=
+                            np.concatenate(([numsteps],self.dataShape)))
+        else:
+            self.data = np.append( self.data,
+                        np.zeros(shape=
+                            np.concatenate(([numsteps],self.dataShape))),
+                        axis=0 )
+
+    def step(self,stepi):
+        self.data[stepi,...] = getattr(self.synObj,self.attrib) 
 
 class SynapsesMeanProbe():
     def __init__(self,synObj,model,name):
@@ -323,3 +436,17 @@ class SynapsesMeanProbe():
         
     def step(self,stepi):
         self.data[stepi] = np.mean(self.synObj.W)
+
+    def reset(self): pass
+
+class SynapsesMeanArbProbe(SynapsesMeanProbe):
+    '''Probe the mean of an arbitrary attribute of a Synapses object.
+    Note: can also use it to probe a scalar attribute of a Synapses object
+    (mean is just superfluous then),
+    e.g. reward of a SynapsesNodePerturb object.'''        
+    def __init__(self,synObj,model,name,attrib):
+        SynapsesMeanProbe.__init__(self,synObj,model,name)
+        self.attrib = attrib
+        
+    def step(self,stepi):
+        self.data[stepi] = np.mean(getattr(self.synObj,self.attrib))
