@@ -262,8 +262,8 @@ class SynapsesPlasticBCM(Synapses):
 
 class SynapsesNodePerturb(Synapses):
     def __init__(self,groupPre,groupPost,model,name, \
-                    learningRate = 1e-5,rewardDecayTau=0.1,voltageDecayTau=0.1,\
-                    minDeltaW=-1e-4,maxDeltaW=+1e-4,clipW=False,minW=-1.,maxW=1.):
+                    learningRate = 1e-4,rewardDecayTau=0.1,voltageDecayTau=0.1,\
+                    minDeltaW=-1e-5,maxDeltaW=+1e-5,clipW=False,minW=-1.,maxW=1.):
         ''' eligibilityTrace += supra-lin-func( pre_rate * (post_memb_pot - running_mean(post_memb_pot)) )
         deltaW = dt * learningRate * eligibilityTrace * (reward - running_mean(reward))
         SI units: learningRate in Hz, rewardDecayTau and voltageDecayTau in s.
