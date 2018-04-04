@@ -55,24 +55,24 @@ class Model():
             raise ValueError('object name '+obj.name+' is duplicate')
     
     def step(self,dt):
+        for obj in self.objects.values():
+            obj.step(dt)
         for synapse in self.synapses.values():
             synapse.step(dt)
         for group in self.groups.values():
             group.step(dt)
         for probe in self.probes.values():
             probe.step(self.stepi)
-        for obj in self.objects.values():
-            obj.step(dt)
 
     def reset(self):
+        for obj in self.objects.values():
+            obj.reset()
         for synapse in self.synapses.values():
             synapse.reset()
         for group in self.groups.values():
             group.reset()
         for probe in self.probes.values():
             probe.reset()
-        for obj in self.objects.values():
-            obj.reset()
             
     def simulate(self,tsim):
         tnows = np.arange(self.t,self.t+tsim,self.dt)
@@ -292,8 +292,10 @@ class SynapsesNodePerturb(Synapses):
         self.reset()
 
     def step(self,dt):
-        # eligibilityTraces updated with previous time steps Post and Pre quantities,
-        # since RateNeuronGroup.step() is called after this
+        # use the weights to update the post neuronal inp-s.
+        Synapses.step(self,dt)
+
+        ## diagnostics
         #print "self.deltaW=",self.deltaW
         #if self.model.t>187.5:
         #    print "self.groupPost.inp",self.groupPost.inp
@@ -303,6 +305,12 @@ class SynapsesNodePerturb(Synapses):
         #    print "self.groupPre.r",self.groupPre.r
         #if self.model.t>188.:
         #    sys.exit()
+
+        # eligibilityTraces updated with previous time steps Pre and current Post quantities,
+        # important for causality
+        # since for Pre rates: RateNeuronGroup.step() is called after this,
+        # and for Post inp: synaptic input is already calculated just above
+        #                   and perturbations in Simulator.objects are called earlier
         self.eligibilityTraces += np.power( np.outer( 
                                                 self.groupPost.inp - self.postVoltageMean,
                                                 self.groupPre.r ), 3 )
@@ -323,9 +331,6 @@ class SynapsesNodePerturb(Synapses):
         self.postVoltageMean = (1-dt/self.voltageDecayTau)*self.postVoltageMean \
                                 + dt/self.voltageDecayTau*self.groupPost.inp
         
-        # use the weights to update the post neuronal inp-s.
-        Synapses.step(self,dt)
-
     def reset(self):
         self.eligibilityTraces = np.zeros(shape=(self.groupPost.N,self.groupPre.N))
         self.stim = 0           # must be an integer
@@ -339,16 +344,22 @@ class SynapsesNodePerturb(Synapses):
 
 class SynapsesNodePerturbStimulusSpecific(SynapsesNodePerturb):
     def __init__(self,groupPre,groupPost,model,name,\
-                    learningRate=1e-4,rewardDecayTau=0.1,voltageDecayTau=0.1,\
-                    minDeltaW=-1e-5,maxDeltaW=+1e-5,clipW=False,minW=-1.,maxW=1.,numStims=3):
+                    learningRate=1e-2,rewardDecayTau=10.,voltageDecayTau=0.1,\
+                    minDeltaW=-1e-4,maxDeltaW=+1e-4,clipW=False,minW=-1.,maxW=1.,numStims=3):
         SynapsesNodePerturb.__init__(self,groupPre,groupPost,model,name,\
                     learningRate,rewardDecayTau,voltageDecayTau,\
                     minDeltaW,maxDeltaW,clipW,minW,maxW,numStims)
         self.rewardMean = np.array([0.]*self.numStims)
 
     def step(self,dt):
-        # eligibilityTraces updated with previous time steps Post and Pre quantities,
-        # since RateNeuronGroup.step() is called after this
+        # use the weights to update the post neuronal inp-s.
+        Synapses.step(self,dt)
+
+        # eligibilityTraces updated with previous time steps Pre and current Post quantities,
+        # important for causality
+        # since for Pre rates: RateNeuronGroup.step() is called after this,
+        # and for Post inp: synaptic input is already calculated just above
+        #                   and perturbations in Simulator.objects are called earlier
         self.eligibilityTraces += np.power( np.outer( 
                                                 self.groupPost.inp - self.postVoltageMean,
                                                 self.groupPre.r ), 3 )
@@ -373,9 +384,6 @@ class SynapsesNodePerturbStimulusSpecific(SynapsesNodePerturb):
         self.postVoltageMean = (1-dt/self.voltageDecayTau)*self.postVoltageMean \
                                 + dt/self.voltageDecayTau*self.groupPost.inp
         
-        # use the weights to update the post neuronal inp-s.
-        Synapses.step(self,dt)
-
     def reset(self):
         self.eligibilityTraces = np.zeros(shape=(self.groupPost.N,self.groupPre.N))
         self.stim = 0           # must be an integer, used to index rewardMeans
