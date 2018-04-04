@@ -261,9 +261,9 @@ class SynapsesPlasticBCM(Synapses):
     def reset(self): pass
 
 class SynapsesNodePerturb(Synapses):
-    def __init__(self,groupPre,groupPost,model,name, \
-                    learningRate = 1e-4,rewardDecayTau=0.1,voltageDecayTau=0.1,\
-                    minDeltaW=-1e-5,maxDeltaW=+1e-5,clipW=False,minW=-1.,maxW=1.):
+    def __init__(self,groupPre,groupPost,model,name,\
+                    learningRate=1e-4,rewardDecayTau=0.1,voltageDecayTau=0.1,\
+                    minDeltaW=-1e-5,maxDeltaW=+1e-5,clipW=False,minW=-1.,maxW=1.,numStims=3):
         ''' eligibilityTrace += supra-lin-func( pre_rate * (post_memb_pot - running_mean(post_memb_pot)) )
         deltaW = dt * learningRate * eligibilityTrace * (reward - running_mean(reward))
         SI units: learningRate in Hz, rewardDecayTau and voltageDecayTau in s.
@@ -273,6 +273,10 @@ class SynapsesNodePerturb(Synapses):
         pre and post neuron groups should be updated after self.step() is called,
          both since neural input depends on synaptic input
           and weights / eligibility traces should be updated using previous neural rates/voltages.
+        Very important for learning only output connections:
+         reset the reward and voltage means across trials!
+        But when using stimulus specific reward means,
+         do not reset the reward-mean across trials!
         '''
         Synapses.__init__(self,groupPre,groupPost,model,name)
         self.learningRate = learningRate
@@ -284,6 +288,7 @@ class SynapsesNodePerturb(Synapses):
         self.clipW=clipW
         self.minW = minW
         self.maxW = maxW
+        self.numStims = numStims
         self.reset()
 
     def step(self,dt):
@@ -323,9 +328,62 @@ class SynapsesNodePerturb(Synapses):
 
     def reset(self):
         self.eligibilityTraces = np.zeros(shape=(self.groupPost.N,self.groupPre.N))
+        self.stim = 0           # must be an integer
         self.reward = 0.0
-        ## Very important: do not reset the reward and voltage means across trials!
+        ## Very important for learning only output connections:
+        ##  reset the reward and voltage means across trials!
+        ## But when using stimulus specific reward means,
+        ##  do not reset the reward-mean across trials!
         self.rewardMean = 0.0
+        self.postVoltageMean = np.zeros(self.groupPost.N)
+
+class SynapsesNodePerturbStimulusSpecific(SynapsesNodePerturb):
+    def __init__(self,groupPre,groupPost,model,name,\
+                    learningRate=1e-4,rewardDecayTau=0.1,voltageDecayTau=0.1,\
+                    minDeltaW=-1e-5,maxDeltaW=+1e-5,clipW=False,minW=-1.,maxW=1.,numStims=3):
+        SynapsesNodePerturb.__init__(self,groupPre,groupPost,model,name,\
+                    learningRate,rewardDecayTau,voltageDecayTau,\
+                    minDeltaW,maxDeltaW,clipW,minW,maxW,numStims)
+        self.rewardMean = np.array([0.]*self.numStims)
+
+    def step(self,dt):
+        # eligibilityTraces updated with previous time steps Post and Pre quantities,
+        # since RateNeuronGroup.step() is called after this
+        self.eligibilityTraces += np.power( np.outer( 
+                                                self.groupPost.inp - self.postVoltageMean,
+                                                self.groupPre.r ), 3 )
+
+        # only the Wconnected == 1 (connected) synapses are modified
+        self.deltaW = self.Wconnected * dt * self.learningRate \
+                    * self.eligibilityTraces * (self.reward - self.rewardMean[self.stim])
+        # clipping the deltaW instead of W yields better stability of learning
+        self.deltaW = np.clip(self.deltaW,self.minDeltaW,self.maxDeltaW)
+        self.W += self.deltaW
+        # clip to not allow too high weights
+        if self.clipW:
+            self.W = np.clip(self.W,self.minW,self.maxW)
+
+        # update the mean reward and mean voltages only after the weights changes
+        # decay all rewardMean traces
+        for i in range(self.numStims):
+            self.rewardMean[i] = (1-dt/self.rewardDecayTau)*self.rewardMean[i]
+        # add reward only to the current stimulus rewardMean
+        self.rewardMean[self.stim] += dt/self.rewardDecayTau*self.reward
+        # post voltage mean
+        self.postVoltageMean = (1-dt/self.voltageDecayTau)*self.postVoltageMean \
+                                + dt/self.voltageDecayTau*self.groupPost.inp
+        
+        # use the weights to update the post neuronal inp-s.
+        Synapses.step(self,dt)
+
+    def reset(self):
+        self.eligibilityTraces = np.zeros(shape=(self.groupPost.N,self.groupPre.N))
+        self.stim = 0           # must be an integer, used to index rewardMeans
+        self.reward = 0.0
+        ## Very important for learning only output connections:
+        ##  reset the reward and voltage means across trials!
+        ## But when using stimulus specific reward means,
+        ##  do not reset the reward-mean across trials!
         self.postVoltageMean = np.zeros(self.groupPost.N)
 
 # ###########################################
